@@ -74,11 +74,15 @@
         showLoading(true);
         showError(false);
 
-        const dates = generateDates(state.period);
-        const results = [];
-        const BATCH = 10;
-
         try {
+            // Fetch all BTC data in a single bulk request
+            const btcBulkResult = await fetchBtcBulkData();
+            
+            // Fetch NBU rates for each day
+            const dates = generateDates(state.period);
+            const results = [];
+            const BATCH = 10;
+
             for (let i = 0; i < dates.length; i += BATCH) {
                 const batch = dates.slice(i, i + BATCH);
                 const batchResults = await Promise.all(batch.map(fetchDay));
@@ -86,6 +90,9 @@
             }
 
             state.data = results.filter(Boolean).sort((a, b) => a.date - b.date);
+
+            // Merge BTC data into state.data
+            mergeBtcData(btcBulkResult);
 
             if (state.data.length === 0) {
                 showError(true, 'No exchange‑rate data available for the selected period.');
@@ -105,43 +112,74 @@
 
     async function fetchDay(date) {
         const ds = fmtAPI(date);
-        try {
-            const [res, btcRes] = await Promise.all([
-                fetch(`${API_BASE}?date=${ds}`),
-                fetch(`${BTC_API_BASE}?date=${ds}`),
-            ]);
-            if (!res.ok) return null;
-            const arr = await res.json();
-            const usd = arr.find((r) => r.cc === 'USD');
-            const eur = arr.find((r) => r.cc === 'EUR');
-            const xau = arr.find((r) => r.cc === 'XAU');
-            const xag = arr.find((r) => r.cc === 'XAG');
 
-            let btcUsd = null;
-            if (btcRes.ok) {
-                const btc = await btcRes.json();
-                if (typeof btc?.usd === 'number' && Number.isFinite(btc.usd) && btc.usd > 0) {
-                    btcUsd = btc.usd;
-                }
-            }
-
-            if (!usd || !eur) return null;
-            const result = {
-                date,
-                label: fmtDisplay(date),
-                USD_UAH: usd.rate,
-                UAH_USD: 1 / usd.rate,
-                EUR_UAH: eur.rate,
-                UAH_EUR: 1 / eur.rate,
-                EUR_USD: eur.rate / usd.rate,
-                USD_EUR: usd.rate / eur.rate,
-            };
-            if (btcUsd != null) result.BTC_USD = btcUsd;
-            if (xau) result.XAU_USD = xau.rate / usd.rate;
-            if (xag) result.XAG_USD = xag.rate / usd.rate;
-            return result;
-        } catch {
+        // Fetch NBU rates
+        const res = await fetch(`${API_BASE}?date=${ds}`);
+        if (!res.ok) {
             return null;
+        }
+
+        const arr = await res.json();
+        const usd = arr.find((r) => r.cc === 'USD');
+        const eur = arr.find((r) => r.cc === 'EUR');
+        const xau = arr.find((r) => r.cc === 'XAU');
+        const xag = arr.find((r) => r.cc === 'XAG');
+
+        if (!usd || !eur) return null;
+        const result = {
+            date,
+            label: fmtDisplay(date),
+            USD_UAH: usd.rate,
+            UAH_USD: 1 / usd.rate,
+            EUR_UAH: eur.rate,
+            UAH_EUR: 1 / eur.rate,
+            EUR_USD: eur.rate / usd.rate,
+            USD_EUR: usd.rate / eur.rate,
+        };
+        if (xau) result.XAU_USD = xau.rate / usd.rate;
+        if (xag) result.XAG_USD = xag.rate / usd.rate;
+        return result;
+    }
+
+    /**
+     * Fetch BTC data in bulk using market_chart endpoint.
+     * Returns a map of date -> price for efficient merging.
+     */
+    async function fetchBtcBulkData() {
+        try {
+            const url = `/api/btc-bulk?days=${state.period}`;
+            const res = await fetch(url);
+            if (!res.ok) {
+                console.warn(`[App] BTC bulk fetch failed: ${res.status}`);
+                return {};
+            }
+            const data = await res.json();
+            console.log(`[App] BTC bulk data received: ${Object.keys(data).length} dates, range: ${data.startDate || 'N/A'} to ${data.endDate || 'N/A'}`);
+            console.log(`[App] BTC sample prices: ${JSON.stringify(Object.entries(data).slice(0, 5))}`);
+            return data.prices || {};
+        } catch (err) {
+            console.warn(`[App] BTC bulk fetch error:`, err);
+            return {};
+        }
+    }
+
+    /**
+     * Merge BTC prices into state.data by date.
+     * BTC prices use ISO date keys (YYYY-MM-DD), state.data uses date objects.
+     */
+    function mergeBtcData(btcPrices) {
+        if (!btcPrices || Object.keys(btcPrices).length === 0) return;
+        
+        console.log(`[App] Merging ${Object.keys(btcPrices).length} BTC prices into ${state.data.length} data points`);
+        
+        for (const entry of state.data) {
+            // Convert to YYYY-MM-DD format for matching
+            const isoKey = entry.date.toISOString().split('T')[0];
+            
+            if (btcPrices[isoKey] != null && btcPrices[isoKey] > 0) {
+                entry.BTC_USD = btcPrices[isoKey];
+                console.log(`[App]   ✓ Merged BTC $${btcPrices[isoKey].toFixed(2)} for ${entry.label} (${isoKey})`);
+            }
         }
     }
 
